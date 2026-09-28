@@ -1,0 +1,88 @@
+name: Build & Deploy to Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  # Google Cloud project and region — override via repository variables
+  # if you want to avoid editing this file.
+  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  GCP_REGION: ${{ vars.GCP_REGION || 'europe-west1' }}
+  # Artifact Registry repository name (created once with gcloud, see README)
+  AR_REPOSITORY: parabot
+  IMAGE_NAME: parabot
+  CLOUD_RUN_SERVICE: parabot
+
+jobs:
+  deploy:
+    name: Build, push and deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # required for Workload Identity Federation
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Authenticate to Google Cloud ────────────────────────────────────────
+      # Uses Workload Identity Federation — no long-lived service account keys.
+      # See README for the one-time gcloud setup commands.
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      # ── Configure Docker to push to Artifact Registry ───────────────────────
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.GCP_REGION }}-docker.pkg.dev --quiet
+
+      # ── Build & push image ──────────────────────────────────────────────────
+      - name: Build Docker image
+        run: |
+          docker build \
+            --tag "${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.AR_REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}" \
+            --tag "${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.AR_REPOSITORY }}/${{ env.IMAGE_NAME }}:latest" \
+            .
+
+      - name: Push Docker image
+        run: |
+          docker push "${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.AR_REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          docker push "${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.AR_REPOSITORY }}/${{ env.IMAGE_NAME }}:latest"
+
+      # ── Deploy to Cloud Run ─────────────────────────────────────────────────
+      - name: Deploy to Cloud Run
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.CLOUD_RUN_SERVICE }}
+          region: ${{ env.GCP_REGION }}
+          image: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.AR_REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          # Cloud Run secrets (set up once with gcloud, see README).
+          # Each entry maps an env var to a Secret Manager secret version.
+          secrets: |
+            TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:latest
+            AIRTABLE_TOKEN=AIRTABLE_TOKEN:latest
+            AIRTABLE_BASE_ID=AIRTABLE_BASE_ID:latest
+            OPENWEATHER_API_KEY=OPENWEATHER_API_KEY:latest
+            WU_API_KEY=WU_API_KEY:latest
+            WEBHOOK_SECRET=WEBHOOK_SECRET:latest
+            DAILY_TRIGGER_TOKEN=DAILY_TRIGGER_TOKEN:latest
+          env_vars: |
+            WEBHOOK_URL=${{ steps.deploy.outputs.url }}
+            WU_STATION_ID=IGRIKA1
+            WU_SEVASTO_STATION_ID=ISEVAS24
+          flags: |
+            --min-instances=1
+            --max-instances=1
+            --memory=256Mi
+            --cpu=1
+            --concurrency=80
+            --timeout=60s
+            --allow-unauthenticated
+
+      - name: Show deployed URL
+        run: echo "Deployed to ${{ steps.deploy.outputs.url }}"

@@ -1,0 +1,26 @@
+name: Daily Weather Report
+
+on:
+  schedule:
+    # 09:00 UTC = 12:00 Athens time (UTC+3 in summer / UTC+2 in winter).
+    # Adjust the hour here if you want a different local time year-round,
+    # or use two schedule entries to handle DST exactly.
+    - cron: '0 9 * * *'
+
+  # Allow manual runs from the Actions tab for testing
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    name: Trigger daily weather post
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: POST /trigger_daily_weather
+        run: |
+          response=$(curl --silent --show-error --fail \
+            --max-time 30 \
+            --request POST \
+            --header "X-Trigger-Token: ${{ secrets.DAILY_TRIGGER_TOKEN }}" \
+            "${{ secrets.CLOUD_RUN_URL }}/trigger_daily_weather")
+          echo "Response: $response"
