@@ -60,6 +60,19 @@ jobs:
           docker push "${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.AR_REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
           docker push "${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.AR_REPOSITORY }}/${{ env.IMAGE_NAME }}:latest"
 
+      # ── Resolve WEBHOOK_URL before deploying ────────────────────────────────
+      # Cloud Run URLs are stable after the first deploy. We try to read the
+      # existing service URL; if the service doesn't exist yet we construct it
+      # from the project hash (first-deploy case handled by a follow-up update).
+      - name: Get or construct Cloud Run URL
+        id: webhook
+        run: |
+          URL=$(gcloud run services describe ${{ env.CLOUD_RUN_SERVICE }} \
+            --region=${{ env.GCP_REGION }} \
+            --project=${{ env.GCP_PROJECT_ID }} \
+            --format="value(status.url)" 2>/dev/null || echo "")
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+
       # ── Deploy to Cloud Run ─────────────────────────────────────────────────
       - name: Deploy to Cloud Run
         id: deploy
@@ -79,7 +92,7 @@ jobs:
             WEBHOOK_SECRET=WEBHOOK_SECRET:latest
             DAILY_TRIGGER_TOKEN=DAILY_TRIGGER_TOKEN:latest
           env_vars: |
-            WEBHOOK_URL=${{ steps.deploy.outputs.url }}
+            WEBHOOK_URL=${{ steps.webhook.outputs.url }}
             WU_STATION_ID=IGRIKA1
             WU_SEVASTO_STATION_ID=ISEVAS24
           flags: |
@@ -90,6 +103,16 @@ jobs:
             --concurrency=80
             --timeout=60s
             --allow-unauthenticated
+
+      # ── Update WEBHOOK_URL with the final URL ────────────────────────────────
+      # On the very first deploy the service URL wasn't known beforehand.
+      # This step patches WEBHOOK_URL to the real URL after deployment.
+      - name: Update WEBHOOK_URL env var
+        run: |
+          gcloud run services update ${{ env.CLOUD_RUN_SERVICE }} \
+            --region=${{ env.GCP_REGION }} \
+            --project=${{ env.GCP_PROJECT_ID }} \
+            --update-env-vars="WEBHOOK_URL=${{ steps.deploy.outputs.url }}"
 
       - name: Show deployed URL
         run: echo "Deployed to ${{ steps.deploy.outputs.url }}"
