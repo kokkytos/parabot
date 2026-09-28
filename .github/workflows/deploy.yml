@@ -38,12 +38,6 @@ jobs:
           create_credentials_file: true
           export_environment_variables: true
 
-      # ── Set up gcloud CLI ───────────────────────────────────────────────────
-      - name: Set up gcloud CLI
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ env.GCP_PROJECT_ID }}
-
       # ── Configure Docker to push to Artifact Registry ───────────────────────
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker ${{ env.GCP_REGION }}-docker.pkg.dev --quiet
