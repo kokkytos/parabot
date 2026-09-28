@@ -2,11 +2,11 @@ import os
 import math
 import asyncio
 import logging
-from datetime import datetime, time as dt_time
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import httpx
+from aiohttp import web
 from dotenv import load_dotenv
 
 from telegram import (
@@ -87,12 +87,17 @@ PARAMYTHIA_ELEVATION_M = 300
 WU_STATION_ELEVATION_M = 250       # /weather_gri
 WU_SEVASTO_ELEVATION_M = 150       # /weather_sev
 
-# Daily automatic /weather_all posting time (local time, Greece).
-# Always posts to WEATHER_LOG_CHAT_ID / WEATHER_LOG_THREAD_ID, since a
-# scheduled job has no invoking chat to reply in.
-WEATHER_ALL_SCHEDULE_TIMEZONE = "Europe/Athens"
-WEATHER_ALL_SCHEDULE_HOUR = 12
-WEATHER_ALL_SCHEDULE_MINUTE = 0
+# Webhook / server configuration
+# WEBHOOK_URL: the public HTTPS base URL where Telegram delivers updates,
+# e.g. "https://parabot-abc123-ew.a.run.app". Cloud Run sets PORT
+# automatically; the bot listens on that port.
+WEBHOOK_URL = os.environ["WEBHOOK_URL"]
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")   # optional but recommended
+PORT = int(os.getenv("PORT", "8080"))
+
+# Secret token for the /trigger_daily_weather endpoint. GitHub Actions
+# sends this in the X-Trigger-Token header to prevent unauthorized calls.
+DAILY_TRIGGER_TOKEN = os.getenv("DAILY_TRIGGER_TOKEN", "")
 
 
 # ============================================================
@@ -390,6 +395,7 @@ async def get_wunderground_daily_history(station_id: str, api_key: str, date_str
     Returns the parsed JSON response; the daily stats live under
     each observation's "metric" object as e.g. windspeedHigh, windgustHigh.
     """
+    from datetime import datetime
     if date_str is None:
         date_str = datetime.now().strftime("%Y%m%d")
 
@@ -996,8 +1002,8 @@ async def build_combined_weather_all_message():
     build one combined message + dashboard keyboard. Each source is
     fetched independently, so if one source fails the others are still
     reported; a failed source is shown as an "unavailable" line instead of
-    silently vanishing. Used by both /weather_all and the daily scheduled
-    job so they stay identical.
+    silently vanishing. Used by both /weather_all and the daily trigger
+    endpoint so they stay identical.
 
     Returns (combined_text, dashboard_keyboard).
     """
@@ -1082,31 +1088,6 @@ async def weather_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         thread_id=target_thread_id,
         reply_markup=dashboard_keyboard,
     )
-
-
-# ============================================================
-# DAILY SCHEDULED /WEATHER_ALL
-# ============================================================
-
-async def scheduled_weather_all_job(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Runs automatically once a day (see WEATHER_ALL_SCHEDULE_* config /
-    main()'s job_queue.run_daily call) and posts the same combined report
-    as /weather_all. There's no invoking chat for a scheduled job, so this
-    always posts to the configured weather log topic
-    (WEATHER_LOG_CHAT_ID / WEATHER_LOG_THREAD_ID).
-    """
-    try:
-        combined_text, dashboard_keyboard = await build_combined_weather_all_message()
-        await post_weather_log(
-            bot=context.bot,
-            text=combined_text,
-            chat_id=WEATHER_LOG_CHAT_ID,
-            thread_id=WEATHER_LOG_THREAD_ID,
-            reply_markup=dashboard_keyboard,
-        )
-    except Exception as e:
-        logger.exception("Scheduled /weather_all job failed: %s", e)
 
 
 # ============================================================
@@ -1203,63 +1184,134 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
+# AIOHTTP ROUTES
+# ============================================================
+
+async def handle_health(request: web.Request) -> web.Response:
+    """Liveness / readiness probe for Cloud Run."""
+    return web.Response(text="ok")
+
+
+async def handle_daily_trigger(request: web.Request) -> web.Response:
+    """
+    POST /trigger_daily_weather
+
+    Called by the GitHub Actions scheduled workflow to fire the daily
+    combined weather report. Authenticates via the X-Trigger-Token header.
+    The ptb Application is stored in app["ptb_app"] by main().
+    """
+    if DAILY_TRIGGER_TOKEN:
+        token = request.headers.get("X-Trigger-Token", "")
+        if token != DAILY_TRIGGER_TOKEN:
+            logger.warning("Daily trigger: unauthorized attempt")
+            return web.Response(status=401, text="Unauthorized")
+
+    ptb_app: Application = request.app["ptb_app"]
+
+    try:
+        combined_text, dashboard_keyboard = await build_combined_weather_all_message()
+        await post_weather_log(
+            bot=ptb_app.bot,
+            text=combined_text,
+            chat_id=WEATHER_LOG_CHAT_ID,
+            thread_id=WEATHER_LOG_THREAD_ID,
+            reply_markup=dashboard_keyboard,
+        )
+        logger.info("Daily weather trigger: report posted successfully")
+        return web.Response(text="ok")
+    except Exception as e:
+        logger.exception("Daily weather trigger: failed to post report: %s", e)
+        return web.Response(status=500, text="internal error")
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
-def main():
-    application = (
+async def main():
+    # Build the ptb Application (no job_queue needed)
+    ptb_app = (
         Application
         .builder()
         .token(TELEGRAM_BOT_TOKEN)
+        .updater(None)          # disable the built-in polling updater
         .build()
     )
 
-    # Handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("codes", codes_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("weather_para", weather_para_command))
-    application.add_handler(CommandHandler("weather_gri", weather_gri_command))
-    application.add_handler(CommandHandler("weather_sev", weather_sev_command))
-    application.add_handler(CommandHandler("weather_all", weather_all_command))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(
+    # Register handlers
+    ptb_app.add_handler(CommandHandler("start", start_command))
+    ptb_app.add_handler(CommandHandler("codes", codes_command))
+    ptb_app.add_handler(CommandHandler("help", help_command))
+    ptb_app.add_handler(CommandHandler("weather_para", weather_para_command))
+    ptb_app.add_handler(CommandHandler("weather_gri", weather_gri_command))
+    ptb_app.add_handler(CommandHandler("weather_sev", weather_sev_command))
+    ptb_app.add_handler(CommandHandler("weather_all", weather_all_command))
+    ptb_app.add_handler(CallbackQueryHandler(button_handler))
+    ptb_app.add_handler(
         MessageHandler(
             filters.StatusUpdate.NEW_CHAT_MEMBERS,
             new_member,
         )
     )
-    application.add_error_handler(error_handler)
+    ptb_app.add_error_handler(error_handler)
 
-    # Daily automatic /weather_all report (see WEATHER_ALL_SCHEDULE_*
-    # config near the top of the file). Requires the bot to have been
-    # installed with the job-queue extra:
-    #     pip install "python-telegram-bot[job-queue]"
-    if application.job_queue is not None:
-        application.job_queue.run_daily(
-            scheduled_weather_all_job,
-            time=dt_time(
-                hour=WEATHER_ALL_SCHEDULE_HOUR,
-                minute=WEATHER_ALL_SCHEDULE_MINUTE,
-                tzinfo=ZoneInfo(WEATHER_ALL_SCHEDULE_TIMEZONE),
-            ),
-            name="daily_weather_all",
-        )
-        logger.info(
-            "Scheduled daily /weather_all at %02d:%02d %s",
-            WEATHER_ALL_SCHEDULE_HOUR,
-            WEATHER_ALL_SCHEDULE_MINUTE,
-            WEATHER_ALL_SCHEDULE_TIMEZONE,
-        )
-    else:
-        logger.warning(
-            "JobQueue is not available — daily /weather_all was NOT scheduled. "
-            "Install with: pip install \"python-telegram-bot[job-queue]\""
-        )
+    # Build the aiohttp web application
+    web_app = web.Application()
+    web_app["ptb_app"] = ptb_app
 
-    logger.info("🤖 Telegram Welcome + Airtable Codes Bot is running...")
+    # Webhook path uses the bot token as a secret path segment so that
+    # only Telegram (which knows the full URL) can POST updates to it.
+    webhook_path = f"/webhook/{TELEGRAM_BOT_TOKEN}"
+    webhook_full_url = WEBHOOK_URL.rstrip("/") + webhook_path
 
-    application.run_polling()
+    web_app.router.add_get("/health", handle_health)
+    web_app.router.add_post("/trigger_daily_weather", handle_daily_trigger)
+
+    # Wire Telegram updates through ptb's webhook handler
+    async def handle_telegram_update(request: web.Request) -> web.Response:
+        # Verify the optional secret token header Telegram sends
+        if WEBHOOK_SECRET:
+            secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+            if secret != WEBHOOK_SECRET:
+                logger.warning("Webhook: invalid secret token")
+                return web.Response(status=403, text="Forbidden")
+
+        data = await request.json()
+        update = Update.de_json(data, ptb_app.bot)
+        await ptb_app.process_update(update)
+        return web.Response(text="ok")
+
+    web_app.router.add_post(webhook_path, handle_telegram_update)
+
+    # Initialize and start the ptb application (connects bot, sets up context)
+    await ptb_app.initialize()
+    await ptb_app.start()
+
+    # Register the webhook with Telegram
+    await ptb_app.bot.set_webhook(
+        url=webhook_full_url,
+        secret_token=WEBHOOK_SECRET if WEBHOOK_SECRET else None,
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+    )
+    logger.info("Webhook registered at %s", webhook_full_url)
+
+    # Start the aiohttp server
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
+    await site.start()
+    logger.info("🤖 Parabot is running on port %d (webhook mode)", PORT)
+
+    # Keep running until interrupted
+    try:
+        await asyncio.Event().wait()
+    finally:
+        logger.info("Shutting down…")
+        await ptb_app.bot.delete_webhook()
+        await ptb_app.stop()
+        await ptb_app.shutdown()
+        await runner.cleanup()
 
 
 # ============================================================
@@ -1267,4 +1319,4 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
