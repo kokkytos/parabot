@@ -8,7 +8,7 @@ on:
 env:
   # Google Cloud project and region — override via repository variables
   # if you want to avoid editing this file.
-  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  GCP_PROJECT_ID: paragliding-2026
   GCP_REGION: ${{ vars.GCP_REGION || 'europe-west1' }}
   # Artifact Registry repository name (created once with gcloud, see README)
   AR_REPOSITORY: parabot
