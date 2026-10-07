@@ -164,10 +164,11 @@ async def fetch_user_avatar(user, context: ContextTypes.DEFAULT_TYPE) -> str:
     Fetches and caches the user's Telegram profile picture locally.
 
     Stores the file under AVATAR_DIR/<user_id>.jpg and returns the
-    server-relative URL /avatars/<user_id>.jpg.  The avatar route proxies
-    these files to the browser so the bot token never appears in the client.
+    server-relative URL /avatars/<user_id>.jpg.
 
-    Falls back to DEFAULT_AVATAR if the user has no photo or the fetch fails.
+    If the user has no accessible profile photo (privacy settings or no photo
+    set), falls back to a generated initial-letter avatar via ui-avatars.com
+    so the map marker always shows something identifiable.
     """
     try:
         photos = await context.bot.get_user_profile_photos(user_id=user.id, limit=1)
@@ -197,13 +198,19 @@ async def fetch_user_avatar(user, context: ContextTypes.DEFAULT_TYPE) -> str:
             else:
                 logger.warning("file.file_path is empty for user %s", user.id)
         else:
-            logger.info("User %s has no profile photos", user.id)
+            logger.info(
+                "User %s has no accessible profile photos (privacy settings or no photo set) — "
+                "using initial-letter avatar",
+                user.id,
+            )
 
     except Exception as e:
         logger.error("Error fetching profile photo for user %s: %s", user.id, e, exc_info=True)
 
-    logger.info("Falling back to DEFAULT_AVATAR for user %s", user.id)
-    return DEFAULT_AVATAR
+    # Generate an initial-letter avatar so each person has a unique,
+    # identifiable marker colour even without a profile photo.
+    initials = (user.first_name or "?")[0].upper()
+    return f"https://ui-avatars.com/api/?name={initials}&size=96&rounded=true&bold=true&background=0088cc&color=ffffff"
 
 
 async def update_user_location(user, location, context: ContextTypes.DEFAULT_TYPE):
@@ -215,19 +222,16 @@ async def update_user_location(user, location, context: ContextTypes.DEFAULT_TYP
 
     # Determine whether we need to (re-)fetch the avatar:
     #   1. No URL stored yet.
-    #   2. Stored URL is the default fallback (previous fetch failed — retry).
-    #   3. Stored URL is a local /avatars/ path but the file is gone
-    #      (e.g. container restarted and wiped the ephemeral filesystem).
+    #   2. Stored URL is not a successfully-cached local file
+    #      (covers ui-avatars.com fallbacks, DEFAULT_AVATAR, or a local
+    #      /avatars/ path whose file was wiped by a container restart).
+    #   Once a real local file exists we keep it and skip the API call.
     avatar_url = existing.get("avatar_url", "")
-    needs_fetch = (
-        not avatar_url
-        or avatar_url == DEFAULT_AVATAR
-        or (
-            avatar_url.startswith("/avatars/")
-            and not os.path.isfile(os.path.join(AVATAR_DIR, os.path.basename(avatar_url)))
-        )
+    local_file_ok = (
+        avatar_url.startswith("/avatars/")
+        and os.path.isfile(os.path.join(AVATAR_DIR, os.path.basename(avatar_url)))
     )
-    if needs_fetch:
+    if not local_file_ok:
         avatar_url = await fetch_user_avatar(user, context)
 
     # Preserve altitude already captured via the Mini App geolocation API.
