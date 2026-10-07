@@ -155,18 +155,38 @@ async def fetch_user_avatar(user, context: ContextTypes.DEFAULT_TYPE) -> str:
     """
     try:
         photos = await context.bot.get_user_profile_photos(user_id=user.id, limit=1)
+        logger.info("Avatar fetch for user %s: total_count=%s", user.id, photos.total_count)
+
         if photos.total_count > 0:
             file_id = photos.photos[0][0].file_id
+            logger.info("Avatar file_id for user %s: %s", user.id, file_id)
+
             file = await context.bot.get_file(file_id)
+            logger.info("Avatar file_path for user %s: %s", user.id, file.file_path)
+
             if file.file_path:
-                # Download and cache locally so the browser-facing URL
-                # (/avatars/<id>.jpg) never exposes the bot token.
                 avatar_filename = f"{user.id}.jpg"
                 avatar_path = os.path.join(AVATAR_DIR, avatar_filename)
+                logger.info("Downloading avatar to %s", avatar_path)
                 await file.download_to_drive(avatar_path)
-                return f"/avatars/{avatar_filename}"
+
+                exists = os.path.isfile(avatar_path)
+                size = os.path.getsize(avatar_path) if exists else 0
+                logger.info("Avatar saved: exists=%s size=%d bytes path=%s", exists, size, avatar_path)
+
+                if exists and size > 0:
+                    return f"/avatars/{avatar_filename}"
+                else:
+                    logger.error("Avatar file missing or empty after download: %s", avatar_path)
+            else:
+                logger.warning("file.file_path is empty for user %s", user.id)
+        else:
+            logger.info("User %s has no profile photos", user.id)
+
     except Exception as e:
-        logger.error("Error fetching profile photo for user %s: %s", user.id, e)
+        logger.error("Error fetching profile photo for user %s: %s", user.id, e, exc_info=True)
+
+    logger.info("Falling back to DEFAULT_AVATAR for user %s", user.id)
     return DEFAULT_AVATAR
 
 
@@ -1602,9 +1622,11 @@ async def handle_avatar(request: web.Request) -> web.Response:
     """
     filename = request.match_info["filename"]
     filepath = os.path.join(AVATAR_DIR, filename)
+    logger.info("Avatar request: %s — exists=%s", filepath, os.path.isfile(filepath))
     if os.path.isfile(filepath):
         return web.FileResponse(filepath)
     # File not on disk yet — redirect to the fallback avatar.
+    logger.warning("Avatar not found, redirecting to DEFAULT_AVATAR: %s", filepath)
     raise web.HTTPFound(DEFAULT_AVATAR)
 
 
