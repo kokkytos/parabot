@@ -145,21 +145,26 @@ active_locations: dict = {}
 
 async def fetch_user_avatar(user, context: ContextTypes.DEFAULT_TYPE) -> str:
     """
-    Returns a URL for the user's Telegram profile picture.
+    Fetches and caches the user's Telegram profile picture locally.
 
-    Tries to get the CDN URL directly from the File object (no local disk
-    write needed — Telegram's CDN is accessible from the Mini App WebView).
-    Falls back to DEFAULT_AVATAR if the user has no photo or the lookup fails.
+    Stores the file under AVATAR_DIR/<user_id>.jpg and returns the
+    server-relative URL /avatars/<user_id>.jpg.  The avatar route proxies
+    these files to the browser so the bot token never appears in the client.
+
+    Falls back to DEFAULT_AVATAR if the user has no photo or the fetch fails.
     """
     try:
         photos = await context.bot.get_user_profile_photos(user_id=user.id, limit=1)
         if photos.total_count > 0:
             file_id = photos.photos[0][0].file_id
             file = await context.bot.get_file(file_id)
-            # file.file_path is a full HTTPS URL on Telegram's CDN,
-            # e.g. https://api.telegram.org/file/bot<token>/photos/file_XYZ.jpg
             if file.file_path:
-                return file.file_path
+                # Download and cache locally so the browser-facing URL
+                # (/avatars/<id>.jpg) never exposes the bot token.
+                avatar_filename = f"{user.id}.jpg"
+                avatar_path = os.path.join(AVATAR_DIR, avatar_filename)
+                await file.download_to_drive(avatar_path)
+                return f"/avatars/{avatar_filename}"
     except Exception as e:
         logger.error("Error fetching profile photo for user %s: %s", user.id, e)
     return DEFAULT_AVATAR
@@ -1586,13 +1591,21 @@ async def handle_api_update_location(request: web.Request) -> web.Response:
     return web.Response(text='{"status": "success"}', content_type="application/json")
 
 
-async def handle_avatar(request: web.Request) -> web.FileResponse:
-    """Serve cached avatar images from AVATAR_DIR (legacy fallback)."""
+async def handle_avatar(request: web.Request) -> web.Response:
+    """
+    Serve cached avatar images from AVATAR_DIR.
+
+    The file is written to disk by fetch_user_avatar() when the user first
+    shares their location. If it is missing (e.g. after a container restart
+    on Cloud Run) we return a redirect to DEFAULT_AVATAR so the map always
+    shows something rather than a broken image.
+    """
     filename = request.match_info["filename"]
     filepath = os.path.join(AVATAR_DIR, filename)
-    if not os.path.isfile(filepath):
-        raise web.HTTPNotFound()
-    return web.FileResponse(filepath)
+    if os.path.isfile(filepath):
+        return web.FileResponse(filepath)
+    # File not on disk yet — redirect to the fallback avatar.
+    raise web.HTTPFound(DEFAULT_AVATAR)
 
 
 # ============================================================
