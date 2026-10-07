@@ -216,6 +216,7 @@ async def fetch_user_avatar(user, context: ContextTypes.DEFAULT_TYPE) -> str:
 async def update_user_location(user, location, context: ContextTypes.DEFAULT_TYPE):
     """Upsert a user's live location in the active_locations store."""
     live_period = getattr(location, "live_period", None) or 900
+    logger.info("update_user_location called for user %s (%s)", user.id, user.full_name)
 
     user_id_key = str(user.id)
     existing = active_locations.get(user_id_key, {})
@@ -1414,6 +1415,7 @@ async def delete_later(bot, chat_id, message_id, seconds):
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the initial live-location share or a one-off location pin."""
     msg = update.message
+    logger.info("handle_location fired: msg=%s location=%s", msg is not None, msg.location if msg else None)
     if msg and msg.location and msg.from_user:
         await update_user_location(msg.from_user, msg.location, context)
 
@@ -1421,6 +1423,7 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_live_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle edited-message location updates (live location ticks)."""
     msg = update.edited_message
+    logger.info("handle_live_update fired: msg=%s", msg is not None)
     if not msg or not msg.from_user:
         return
     if msg.location:
@@ -1736,14 +1739,14 @@ async def main():
     # Live location: initial share (new message with location)
     ptb_app.add_handler(
         MessageHandler(
-            filters.LOCATION & ~filters.UpdateType.EDITED,
+            filters.LOCATION & ~filters.UpdateType.EDITED_MESSAGE,
             handle_location,
         )
     )
     # Live location: periodic ticks and stop events (edited message)
     ptb_app.add_handler(
         MessageHandler(
-            filters.LOCATION & filters.UpdateType.EDITED,
+            filters.LOCATION & filters.UpdateType.EDITED_MESSAGE,
             handle_live_update,
         )
     )
