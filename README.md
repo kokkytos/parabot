@@ -35,11 +35,12 @@ Deployed on **Google Cloud Run** (webhook mode). The daily weather report is tri
   - Run in a **group/topic** → the command message is deleted and the reply is posted to a single, pre-configured "weather log" topic, keeping the rest of the group tidy.
 
 ### Live location map
-- `/map` — Opens an interactive live group map as a **Telegram Mini App** (Web App). Members share their live location via the Telegram attachment menu; the map updates every 3 seconds.
+- `/map` — Opens an interactive live group map as a **Telegram Mini App** (Web App). Members share their **live location** (not a static pin) via the Telegram attachment menu (**Attachment → Location → Share Live Location**, choose a duration); the map updates every 3 seconds showing real-time movement.
 - Each member appears as a **circular avatar marker** showing their Telegram profile picture. Tapping a marker shows their name, username, altitude, and a link to follow them in Google Maps.
 - **Altitude** is captured from the device's GPS via the browser Geolocation API and merged with the Telegram live-location data, so it works even when Telegram's native location share doesn't expose altitude.
 - Stale entries (no update for more than 3 minutes) are automatically removed from the map.
 - The map is served by the same aiohttp server as the bot, at `GET /`. Profile pictures are cached locally in `avatars/` and served at `GET /avatars/{filename}`.
+- **Important:** Only "Share Live Location" works — "Send Current Location" (static pin) sends no updates and won't appear on the map.
 
 ### `/help`
 Shows an in-chat summary of all commands and behavior.
