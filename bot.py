@@ -1437,15 +1437,15 @@ MAP_HTML_PAGE = """<!DOCTYPE html>
         function createPopupContent(user) {
             const googleMapsUrl = `https://www.google.com/maps?q=${user.lat},${user.lng}`;
             const altitudeText = (user.altitude !== null && user.altitude !== undefined)
-                ? `\u26f0\ufe0f Altitude: <b>${user.altitude} m</b>`
-                : `\u26f0\ufe0f Altitude: <i>N/A</i>`;
+                ? `⛰️ Altitude: <b>${user.altitude} m</b>`
+                : `⛰️ Altitude: <i>N/A</i>`;
             return `
                 <div class="popup-card">
                     <div class="popup-name">${user.name}</div>
                     <div class="popup-username">@${user.username}</div>
                     <div class="popup-altitude">${altitudeText}</div>
                     <a href="${googleMapsUrl}" target="_blank" class="gmaps-btn">
-                        \ud83d\udccd Follow on Google Maps
+                        📍 Follow on Google Maps
                     </a>
                 </div>`;
         }
