@@ -81,6 +81,7 @@ jobs:
             DAILY_TRIGGER_TOKEN=DAILY_TRIGGER_TOKEN:latest
           env_vars: |
             WEBHOOK_URL=${{ steps.existing.outputs.url }}
+            MINI_APP_URL=${{ steps.existing.outputs.url }}
             WU_STATION_ID=IGRIKA1
             WU_SEVASTO_STATION_ID=ISEVAS24
           flags: |
@@ -100,7 +101,7 @@ jobs:
           gcloud run services update ${{ env.CLOUD_RUN_SERVICE }} \
             --region=${{ env.GCP_REGION }} \
             --project=${{ env.GCP_PROJECT_ID }} \
-            --update-env-vars="WEBHOOK_URL=${{ steps.deploy.outputs.url }}"
+            --update-env-vars="WEBHOOK_URL=${{ steps.deploy.outputs.url }},MINI_APP_URL=${{ steps.deploy.outputs.url }}"
           gcloud run services update-traffic ${{ env.CLOUD_RUN_SERVICE }} \
             --region=${{ env.GCP_REGION }} \
             --project=${{ env.GCP_PROJECT_ID }} \
