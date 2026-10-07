@@ -5,8 +5,9 @@ A Telegram bot for a paragliding community that handles:
 - **Private Check-In/Check-Out codes** for participants, looked up in Airtable and delivered via a personalized link + QR code.
 - **New member onboarding** in group chats, with a temporary welcome message and a deep link to a private welcome DM.
 - **Weather reporting** for a flying site (Paramythia, Greece) and two personal Weather Underground stations, including an estimated cloudbase, with both on-demand commands and a daily scheduled post.
+- **Live group location map** — members share their live Telegram location and see everyone on an interactive Leaflet map served as a Telegram Mini App, complete with profile picture avatars and altitude from the device GPS.
 
-Built with [python-telegram-bot](https://docs.python-telegram-bot.org/), [aiohttp](https://docs.aiohttp.org/), [httpx](https://www.python-httpx.org/), and the [Airtable](https://airtable.com/) and [OpenWeather](https://openweathermap.org/api) / [Weather Underground](https://www.wunderground.com/) APIs.
+Built with [python-telegram-bot](https://docs.python-telegram-bot.org/), [aiohttp](https://docs.aiohttp.org/), [httpx](https://www.python-httpx.org/), and the [Airtable](https://airtable.com/), [OpenWeather](https://openweathermap.org/api), and [Weather Underground](https://www.wunderground.com/) APIs.
 
 Deployed on **Google Cloud Run** (webhook mode). The daily weather report is triggered by a **GitHub Actions scheduled workflow** rather than an in-process scheduler.
 
@@ -33,6 +34,13 @@ Deployed on **Google Cloud Run** (webhook mode). The daily weather report is tri
   - Run in a **private chat** with the bot → the reply is sent there.
   - Run in a **group/topic** → the command message is deleted and the reply is posted to a single, pre-configured "weather log" topic, keeping the rest of the group tidy.
 
+### Live location map
+- `/map` — Opens an interactive live group map as a **Telegram Mini App** (Web App). Members share their live location via the Telegram attachment menu; the map updates every 3 seconds.
+- Each member appears as a **circular avatar marker** showing their Telegram profile picture. Tapping a marker shows their name, username, altitude, and a link to follow them in Google Maps.
+- **Altitude** is captured from the device's GPS via the browser Geolocation API and merged with the Telegram live-location data, so it works even when Telegram's native location share doesn't expose altitude.
+- Stale entries (no update for more than 3 minutes) are automatically removed from the map.
+- The map is served by the same aiohttp server as the bot, at `GET /`. Profile pictures are cached locally in `avatars/` and served at `GET /avatars/{filename}`.
+
 ### `/help`
 Shows an in-chat summary of all commands and behavior.
 
@@ -50,6 +58,12 @@ GitHub (main branch push)
 Telegram
   └─▶ HTTPS POST /webhook/<token>
         └─ bot.py (aiohttp + python-telegram-bot)
+
+  └─▶ Mini App (GET /)
+        └─ bot.py serves Leaflet map page
+              ├─ GET  /api/locations       → active live locations (JSON)
+              ├─ POST /api/update_location → altitude push from Mini App
+              └─ GET  /avatars/{filename}  → cached profile pictures
 
 GitHub Actions cron (09:00 UTC = 12:00 Athens)
   └─▶ daily_weather.yml workflow
@@ -78,6 +92,7 @@ On all subsequent deploys the URL is known in advance, so this is a transparent 
 ├── Dockerfile                      # Two-stage image for Cloud Run
 ├── requirements.txt                # Pinned dependencies
 ├── .env.example                    # Template — copy to .env for local dev
+├── avatars/                        # Runtime cache for user profile pictures (git-ignored)
 ├── .github/
 │   └── workflows/
 │       ├── deploy.yml              # Build & deploy on push to main
@@ -116,11 +131,13 @@ Start an ngrok tunnel (in a separate terminal):
 ngrok http 8080
 ```
 
-Set `WEBHOOK_URL` in `.env` to the ngrok HTTPS URL (e.g. `https://abc123.ngrok.io`), then run the bot:
+Set both `WEBHOOK_URL` and `MINI_APP_URL` in `.env` to the ngrok HTTPS URL (e.g. `https://abc123.ngrok.io`), then run the bot:
 
 ```bash
 python bot.py
 ```
+
+The live map will be accessible at `https://abc123.ngrok.io/` and the `/map` command will open it as a Mini App inside Telegram.
 
 To test the daily trigger locally:
 
@@ -141,6 +158,7 @@ All configuration is via environment variables. In Cloud Run these are injected 
 | `AIRTABLE_TOKEN` | ✅ | — | Airtable personal access token |
 | `AIRTABLE_BASE_ID` | ✅ | — | Airtable base ID (`app…`) |
 | `WEBHOOK_URL` | ✅ | — | Public HTTPS base URL (no trailing slash). In Cloud Run this is set automatically by the deploy workflow. For local dev use an ngrok URL. |
+| `MINI_APP_URL` | map | `""` | Public HTTPS URL Telegram opens as the Web App when a user taps `/map`. Typically the same as `WEBHOOK_URL` since the map is served at `GET /`. |
 | `WEBHOOK_SECRET` | recommended | `""` | Secret token for Telegram webhook verification. Generate with `openssl rand -hex 32`. |
 | `DAILY_TRIGGER_TOKEN` | recommended | `""` | Token for the `/trigger_daily_weather` endpoint. Generate with `openssl rand -hex 32`. Must match the `DAILY_TRIGGER_TOKEN` GitHub Actions secret. |
 | `OPENWEATHER_API_KEY` | weather | — | For `/weather_para` |
@@ -149,7 +167,7 @@ All configuration is via environment variables. In Cloud Run these are injected 
 | `WU_SEVASTO_STATION_ID` | — | `ISEVAS24` | Sevasto WU station ID |
 | `PORT` | — | `8080` | Port the server listens on (Cloud Run sets this automatically) |
 
-Constants that are not environment variables (weather log chat/topic IDs, site coordinates and elevations, the daily schedule time) are defined near the top of `bot.py` and can be edited there.
+Constants that are not environment variables (weather log chat/topic IDs, site coordinates and elevations, the daily schedule time, stale-location timeout) are defined near the top of `bot.py` and can be edited there.
 
 ### Airtable setup
 
@@ -160,6 +178,15 @@ The bot expects a table (default name: `Participants`) with at least these field
 | `Telegram_ID` | Text/Number | Telegram numeric user ID (fallback lookup key) |
 | `Telegram_Username` | Text | Telegram `@username` (primary lookup key, case-insensitive, `@` optional) |
 | `Custom_CheckInOut_URL` | URL | Personalized smart link routing to the correct Check-In or Check-Out form |
+
+### Mini App setup
+
+For the `/map` command to open the map inside Telegram, the URL set in `MINI_APP_URL` must be registered as a **Web App** with [@BotFather](https://t.me/BotFather):
+
+1. Open @BotFather → `/mybots` → select your bot → **Bot Settings** → **Menu Button** (or **Configure Mini App**).
+2. Set the URL to your `MINI_APP_URL` value.
+
+Alternatively the map opens fine from the inline button produced by `/map` without registering a menu button — registration just adds a persistent shortcut icon in the chat input bar.
 
 ---
 
@@ -264,7 +291,8 @@ for SECRET in \
   OPENWEATHER_API_KEY \
   WU_API_KEY \
   WEBHOOK_SECRET \
-  DAILY_TRIGGER_TOKEN; do
+  DAILY_TRIGGER_TOKEN \
+  MINI_APP_URL; do
   gcloud secrets create "$SECRET" --replication-policy=automatic --project "$PROJECT_ID"
   echo -n "your-secret-value" | \
     gcloud secrets versions add "$SECRET" --data-file=- --project "$PROJECT_ID"
@@ -309,7 +337,7 @@ Push to `main`. The `deploy.yml` workflow:
 
 1. Builds the Docker image and pushes it to Artifact Registry.
 2. Deploys to Cloud Run with `--no-traffic` (the service URL isn't known yet so `WEBHOOK_URL` is empty; the bot starts but skips webhook registration).
-3. Patches `WEBHOOK_URL` with the real service URL and migrates 100% traffic to the new revision. The bot restarts and registers the webhook with Telegram.
+3. Patches `WEBHOOK_URL` (and `MINI_APP_URL`) with the real service URL and migrates 100% traffic to the new revision. The bot restarts and registers the webhook with Telegram.
 
 After the first successful deploy:
 
@@ -327,6 +355,10 @@ Push to `main`. The workflow runs automatically. `WEBHOOK_URL` is read from the 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | `GET` | `/health` | None | Liveness / readiness probe (returns `200 ok`) |
+| `GET` | `/` | None | Live map Mini App HTML page |
+| `GET` | `/api/locations` | None | Active live locations as JSON (polled by the map every 3 s) |
+| `POST` | `/api/update_location` | None | Altitude + position push from the Mini App browser |
+| `GET` | `/avatars/{filename}` | None | Cached Telegram profile pictures |
 | `POST` | `/webhook/<token>` | Telegram secret token header | Receives Telegram updates |
 | `POST` | `/trigger_daily_weather` | `X-Trigger-Token` header | Fires the daily weather report |
 
@@ -338,6 +370,7 @@ Push to `main`. The workflow runs automatically. `WEBHOOK_URL` is read from the 
 |---|---|
 | `/start` | Opens a private chat and shows the **My Code** button |
 | `/codes` | Sends your personal Check-In/Check-Out link + QR code (always via DM) |
+| `/map` | Opens the interactive live group location map as a Telegram Mini App |
 | `/help` | Shows command help |
 | `/weather_para` | Current weather for Paramythia, Greece |
 | `/weather_gri` | Current + daily-max weather for the Grika station |
@@ -351,6 +384,8 @@ Push to `main`. The workflow runs automatically. `WEBHOOK_URL` is read from the 
 - The bot never posts anything back into a group in response to `/codes` — it always attempts to DM the user, and silently logs if it can't (e.g. the user has never started a private chat with the bot).
 - Weather sources are fetched independently in `/weather_all` and the daily trigger, so a failure in one source doesn't prevent the others from being reported — it's shown as "Unavailable" instead.
 - Cloudbase estimates use Espy's equation (`h = 125 × (T − Td)`, meters AGL) converted to meters ASL using each location's configured ground elevation. This is a rough estimate, not a substitute for official soaring/weather briefings.
+- The live map stores locations in memory only — they are lost on a server restart. This is intentional; live location sharing is a real-time feature and stale data from a previous session would be misleading.
+- The `/api/locations` and `/api/update_location` endpoints have no authentication. They are only suitable for a private community bot where the Mini App URL is not publicly advertised. If you need to restrict access, add a shared secret check in `handle_api_update_location`.
 - GitHub Actions cron schedules run at UTC. The workflow uses `0 9 * * *` (09:00 UTC = 12:00 Athens summer time, UTC+3). Adjust the hour for winter (UTC+2 → use `0 10 * * *`) or add a second cron entry to cover both offsets.
 
 ## License

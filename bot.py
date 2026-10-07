@@ -2,6 +2,7 @@ import os
 import math
 import asyncio
 import logging
+import time
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -11,8 +12,10 @@ from dotenv import load_dotenv
 
 from telegram import (
     Update,
+    BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    WebAppInfo,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -99,6 +102,20 @@ PORT = int(os.getenv("PORT", "8080"))
 # sends this in the X-Trigger-Token header to prevent unauthorized calls.
 DAILY_TRIGGER_TOKEN = os.getenv("DAILY_TRIGGER_TOKEN", "")
 
+# Live tracking Mini App
+# MINI_APP_URL: the public HTTPS URL that Telegram opens as a Web App
+# when a user taps /map. Must be the same base URL as WEBHOOK_URL
+# (or any HTTPS URL serving the Flask/aiohttp map page).
+MINI_APP_URL = os.getenv("MINI_APP_URL", "")
+
+# Local directory used to cache Telegram profile pictures so the map
+# can serve them over HTTP without hitting Telegram's CDN on every refresh.
+AVATAR_DIR = "avatars"
+os.makedirs(AVATAR_DIR, exist_ok=True)
+
+# Fallback avatar shown when no profile picture is available.
+DEFAULT_AVATAR = "https://cdn-icons-png.flaticon.com/512/149/149071.png"
+
 
 # ============================================================
 # LOGGING
@@ -112,6 +129,89 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+# ============================================================
+# LIVE TRACKING STATE
+# ============================================================
+
+# Shared in-memory store: { user_id_str -> location_dict }
+active_locations: dict = {}
+
+
+# ============================================================
+# LIVE TRACKING HELPERS
+# ============================================================
+
+async def fetch_user_avatar(user, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """
+    Download the user's Telegram profile picture to AVATAR_DIR so the
+    map page can serve it locally. Returns a relative URL path on success,
+    or DEFAULT_AVATAR as a fallback.
+    """
+    try:
+        photos = await context.bot.get_user_profile_photos(user_id=user.id, limit=1)
+        if photos.total_count > 0:
+            file_id = photos.photos[0][0].file_id
+            file = await context.bot.get_file(file_id)
+            avatar_filename = f"{user.id}.jpg"
+            avatar_path = os.path.join(AVATAR_DIR, avatar_filename)
+            await file.download_to_drive(avatar_path)
+            return f"/avatars/{avatar_filename}"
+    except Exception as e:
+        logger.error("Error fetching profile photo for user %s: %s", user.id, e)
+    return DEFAULT_AVATAR
+
+
+async def update_user_location(user, location, context: ContextTypes.DEFAULT_TYPE):
+    """Upsert a user's live location in the active_locations store."""
+    live_period = getattr(location, "live_period", None) or 900
+
+    user_id_key = str(user.id)
+    existing = active_locations.get(user_id_key, {})
+
+    # Re-use a cached avatar URL to avoid redundant Telegram API calls.
+    avatar_url = existing.get("avatar_url")
+    if not avatar_url or avatar_url == DEFAULT_AVATAR:
+        avatar_url = await fetch_user_avatar(user, context)
+
+    # Preserve altitude already captured via the Mini App geolocation API.
+    existing_altitude = existing.get("altitude")
+
+    active_locations[user_id_key] = {
+        "name": user.full_name,
+        "username": user.username or user.first_name,
+        "avatar_url": avatar_url,
+        "lat": location.latitude,
+        "lng": location.longitude,
+        "heading": getattr(location, "heading", None) or 0,
+        "altitude": existing_altitude,
+        "last_updated": time.time(),
+        "live_period": live_period,
+    }
+
+
+def remove_user_location(user_id, reason: str = "Stopped sharing"):
+    user_id_key = str(user_id)
+    if user_id_key in active_locations:
+        del active_locations[user_id_key]
+        logger.info("Removed user %s from live map (%s)", user_id_key, reason)
+
+
+async def cleanup_stale_locations():
+    """
+    Async background task: removes users whose location has not been
+    updated for more than 3 minutes (180 s). Runs every 10 seconds.
+    """
+    while True:
+        await asyncio.sleep(10)
+        now = time.time()
+        expired = [
+            uid for uid, u in list(active_locations.items())
+            if (now - u["last_updated"]) > 180
+        ]
+        for uid in expired:
+            remove_user_location(uid, reason="Timeout")
 
 
 # ============================================================
@@ -641,6 +741,37 @@ async def codes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
+# /MAP COMMAND
+# ============================================================
+
+async def map_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Send an inline button that opens the live group location map as a
+    Telegram Mini App (Web App). Works in both private and group chats.
+    """
+    if not update.message:
+        return
+
+    if not MINI_APP_URL:
+        await update.message.reply_text(
+            "⚠️ The live map is not configured yet. "
+            "Please ask an administrator to set MINI_APP_URL."
+        )
+        return
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            text="🗺️ Open Live Group Map",
+            web_app=WebAppInfo(url=MINI_APP_URL),
+        )]
+    ])
+    await update.message.reply_text(
+        "Tap below to open the interactive live map inside Telegram:",
+        reply_markup=keyboard,
+    )
+
+
+# ============================================================
 # /HELP COMMAND
 # ============================================================
 
@@ -674,6 +805,12 @@ HELP_TEXT = (
     "meters ASL, calculated from temperature and dew point using Espy's "
     "equation (h = 125 × (T − Td), AGL) plus each location's ground "
     "elevation.\n\n"
+
+    "📍 <b>Live Map</b>\n"
+    "• <code>/map</code> — Opens the interactive live group map inside "
+    "Telegram. Share your <b>live location</b> in the chat "
+    "(Attachment → Location → Share Live Location) to appear on the "
+    "map with your avatar, heading, and altitude.\n\n"
 
     "📍 <b>Where replies go</b>\n"
     "• Run a weather command in your <b>private chat</b> with the bot → "
@@ -1176,11 +1313,248 @@ async def delete_later(bot, chat_id, message_id, seconds):
 
 
 # ============================================================
+# LOCATION HANDLERS (LIVE TRACKING)
+# ============================================================
+
+async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the initial live-location share or a one-off location pin."""
+    msg = update.message
+    if msg and msg.location and msg.from_user:
+        await update_user_location(msg.from_user, msg.location, context)
+
+
+async def handle_live_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle edited-message location updates (live location ticks)."""
+    msg = update.edited_message
+    if not msg or not msg.from_user:
+        return
+    if msg.location:
+        # live_period == 0 means the user tapped "Stop sharing"
+        if getattr(msg.location, "live_period", None) == 0:
+            remove_user_location(msg.from_user.id, reason="Manually Stopped")
+        else:
+            await update_user_location(msg.from_user, msg.location, context)
+
+
+# ============================================================
 # ERROR HANDLER
 # ============================================================
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Telegram update error", exc_info=context.error)
+
+
+# ============================================================
+# LIVE MAP HTML PAGE
+# ============================================================
+
+MAP_HTML_PAGE = """<!DOCTYPE html>
+<html>
+<head>
+    <title>Paragliding Live Map</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; width: 100%; overflow: hidden;
+                     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+        #map { height: 100vh; width: 100vw; }
+
+        .avatar-marker {
+            width: 48px; height: 48px; border-radius: 50%;
+            border: 3px solid #0088cc;
+            box-shadow: 0px 3px 8px rgba(0,0,0,0.4);
+            background-size: cover; background-position: center; background-color: #fff;
+            transition: all 0.3s ease;
+        }
+        .popup-card { text-align: center; padding: 4px; }
+        .popup-name { font-size: 15px; font-weight: bold; color: #222; margin-bottom: 2px; }
+        .popup-username { font-size: 12px; color: #666; margin-bottom: 6px; }
+        .popup-altitude {
+            font-size: 12px; font-weight: 500; color: #2e7d32;
+            background-color: #e8f5e9; padding: 4px 8px;
+            border-radius: 4px; margin-bottom: 10px; display: inline-block;
+        }
+        .gmaps-btn {
+            display: inline-block; background-color: #4285F4; color: white !important;
+            text-decoration: none; padding: 8px 12px; font-size: 12px; font-weight: 600;
+            border-radius: 6px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+        .gmaps-btn:hover { background-color: #3367D6; }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <script>
+        const tg = window.Telegram.WebApp;
+        tg.ready();
+        tg.expand();
+
+        const map = L.map('map').setView([39.47, 20.51], 12);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '&copy; OpenStreetMap'
+        }).addTo(map);
+
+        let markers = {};
+        let boundsSet = false;
+
+        // Push device altitude to the server so the map popup can show it.
+        if ("geolocation" in navigator && tg.initDataUnsafe && tg.initDataUnsafe.user) {
+            navigator.geolocation.watchPosition(
+                (position) => {
+                    const altitude = position.coords.altitude !== null
+                        ? Math.round(position.coords.altitude) : null;
+                    fetch('/api/update_location', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            user_id:  tg.initDataUnsafe.user.id,
+                            name:     (tg.initDataUnsafe.user.first_name + ' ' +
+                                       (tg.initDataUnsafe.user.last_name || '')).trim(),
+                            username: tg.initDataUnsafe.user.username || '',
+                            lat:      position.coords.latitude,
+                            lng:      position.coords.longitude,
+                            altitude: altitude
+                        })
+                    }).catch(err => console.error("Altitude push error:", err));
+                },
+                (err) => console.warn("Geolocation error:", err.message),
+                { enableHighAccuracy: true }
+            );
+        }
+
+        function createAvatarIcon(avatarUrl) {
+            return L.divIcon({
+                className: 'custom-leaflet-icon',
+                html: `<div class="avatar-marker" style="background-image: url('${avatarUrl}');"></div>`,
+                iconSize: [48, 48], iconAnchor: [24, 24], popupAnchor: [0, -26]
+            });
+        }
+
+        function createPopupContent(user) {
+            const googleMapsUrl = `https://www.google.com/maps?q=${user.lat},${user.lng}`;
+            const altitudeText = (user.altitude !== null && user.altitude !== undefined)
+                ? `\u26f0\ufe0f Altitude: <b>${user.altitude} m</b>`
+                : `\u26f0\ufe0f Altitude: <i>N/A</i>`;
+            return `
+                <div class="popup-card">
+                    <div class="popup-name">${user.name}</div>
+                    <div class="popup-username">@${user.username}</div>
+                    <div class="popup-altitude">${altitudeText}</div>
+                    <a href="${googleMapsUrl}" target="_blank" class="gmaps-btn">
+                        \ud83d\udccd Follow on Google Maps
+                    </a>
+                </div>`;
+        }
+
+        async function fetchLocations() {
+            try {
+                const response = await fetch('/api/locations');
+                const users = await response.json();
+                const activeIds = new Set(Object.keys(users));
+
+                for (const uid in markers) {
+                    if (!activeIds.has(uid)) {
+                        map.removeLayer(markers[uid]);
+                        delete markers[uid];
+                    }
+                }
+
+                const bounds = [];
+                for (const [userId, user] of Object.entries(users)) {
+                    const latLng = [user.lat, user.lng];
+                    bounds.push(latLng);
+                    const popupHTML = createPopupContent(user);
+                    if (markers[userId]) {
+                        markers[userId].setLatLng(latLng);
+                        markers[userId].getPopup().setContent(popupHTML);
+                    } else {
+                        const icon = createAvatarIcon(user.avatar_url || '');
+                        markers[userId] = L.marker(latLng, { icon })
+                            .addTo(map).bindPopup(popupHTML);
+                    }
+                }
+
+                if (!boundsSet && bounds.length > 0) {
+                    map.fitBounds(bounds, { padding: [40, 40], maxZoom: 15 });
+                    boundsSet = true;
+                }
+            } catch (err) {
+                console.error("Map refresh error:", err);
+            }
+        }
+
+        setInterval(fetchLocations, 3000);
+        fetchLocations();
+    </script>
+</body>
+</html>"""
+
+
+# ============================================================
+# AIOHTTP ROUTES — LIVE MAP
+# ============================================================
+
+async def handle_map_index(request: web.Request) -> web.Response:
+    """Serve the Mini App HTML page."""
+    return web.Response(text=MAP_HTML_PAGE, content_type="text/html")
+
+
+async def handle_api_locations(request: web.Request) -> web.Response:
+    """Return all active locations as JSON."""
+    import json
+    return web.Response(
+        text=json.dumps(active_locations),
+        content_type="application/json",
+    )
+
+
+async def handle_api_update_location(request: web.Request) -> web.Response:
+    """
+    POST /api/update_location
+
+    Called by the Mini App's JavaScript to push the browser's
+    geolocation (including altitude) back to the server so the map
+    can display it alongside the Telegram live-location data.
+    """
+    import json
+    try:
+        data = await request.json()
+    except Exception:
+        return web.Response(status=400, text='{"error": "Invalid JSON"}',
+                            content_type="application/json")
+
+    if not data or "user_id" not in data:
+        return web.Response(status=400, text='{"error": "Missing user_id"}',
+                            content_type="application/json")
+
+    user_id_key = str(data["user_id"])
+    existing = active_locations.get(user_id_key, {})
+
+    active_locations[user_id_key] = {
+        "name":         data.get("name") or existing.get("name") or "Telegram User",
+        "username":     data.get("username") or existing.get("username") or "",
+        "avatar_url":   existing.get("avatar_url") or DEFAULT_AVATAR,
+        "lat":          data["lat"],
+        "lng":          data["lng"],
+        "altitude":     data.get("altitude"),
+        "heading":      existing.get("heading", 0),
+        "last_updated": time.time(),
+        "live_period":  existing.get("live_period", 900),
+    }
+    return web.Response(text='{"status": "success"}', content_type="application/json")
+
+
+async def handle_avatar(request: web.Request) -> web.FileResponse:
+    """Serve cached avatar images from AVATAR_DIR."""
+    filename = request.match_info["filename"]
+    filepath = os.path.join(AVATAR_DIR, filename)
+    if not os.path.isfile(filepath):
+        raise web.HTTPNotFound()
+    return web.FileResponse(filepath)
 
 
 # ============================================================
@@ -1242,6 +1616,7 @@ async def main():
     ptb_app.add_handler(CommandHandler("start", start_command))
     ptb_app.add_handler(CommandHandler("codes", codes_command))
     ptb_app.add_handler(CommandHandler("help", help_command))
+    ptb_app.add_handler(CommandHandler("map", map_command))
     ptb_app.add_handler(CommandHandler("weather_para", weather_para_command))
     ptb_app.add_handler(CommandHandler("weather_gri", weather_gri_command))
     ptb_app.add_handler(CommandHandler("weather_sev", weather_sev_command))
@@ -1251,6 +1626,20 @@ async def main():
         MessageHandler(
             filters.StatusUpdate.NEW_CHAT_MEMBERS,
             new_member,
+        )
+    )
+    # Live location: initial share (new message with location)
+    ptb_app.add_handler(
+        MessageHandler(
+            filters.LOCATION & ~filters.UpdateType.EDITED,
+            handle_location,
+        )
+    )
+    # Live location: periodic ticks and stop events (edited message)
+    ptb_app.add_handler(
+        MessageHandler(
+            filters.LOCATION & filters.UpdateType.EDITED,
+            handle_live_update,
         )
     )
     ptb_app.add_error_handler(error_handler)
@@ -1266,6 +1655,12 @@ async def main():
 
     web_app.router.add_get("/health", handle_health)
     web_app.router.add_post("/trigger_daily_weather", handle_daily_trigger)
+
+    # Live map routes
+    web_app.router.add_get("/", handle_map_index)
+    web_app.router.add_get("/api/locations", handle_api_locations)
+    web_app.router.add_post("/api/update_location", handle_api_update_location)
+    web_app.router.add_get("/avatars/{filename}", handle_avatar)
 
     # Wire Telegram updates through ptb's webhook handler
     async def handle_telegram_update(request: web.Request) -> web.Response:
@@ -1287,6 +1682,19 @@ async def main():
     await ptb_app.initialize()
     await ptb_app.start()
 
+    # Register the bot command menu visible in the Telegram UI
+    await ptb_app.bot.set_my_commands([
+        BotCommand("start",        "Open your private chat with the bot"),
+        BotCommand("codes",        "Get your personal Check-In/Check-Out code"),
+        BotCommand("map",          "Open the live group location map"),
+        BotCommand("weather_para", "Current weather for Paramythia (OpenWeather)"),
+        BotCommand("weather_gri",  "Current conditions – Grika WU station"),
+        BotCommand("weather_sev",  "Current conditions – Sevasto WU station"),
+        BotCommand("weather_all",  "All three weather reports combined"),
+        BotCommand("help",         "Show all commands and instructions"),
+    ])
+    logger.info("Bot command menu registered.")
+
     # Register the webhook with Telegram (skipped if WEBHOOK_URL is not set,
     # which can happen on the very first Cloud Run deploy before the URL is known)
     if WEBHOOK_URL:
@@ -1307,6 +1715,9 @@ async def main():
     site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
     await site.start()
     logger.info("🤖 Parabot is running on port %d (webhook mode)", PORT)
+
+    # Start the background task that evicts stale live-location entries
+    asyncio.create_task(cleanup_stale_locations())
 
     # Keep running until interrupted
     try:
