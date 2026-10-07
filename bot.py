@@ -110,8 +110,24 @@ MINI_APP_URL = os.getenv("MINI_APP_URL", "")
 
 # Local directory used to cache Telegram profile pictures so the map
 # can serve them over HTTP without hitting Telegram's CDN on every refresh.
-AVATAR_DIR = "avatars"
-os.makedirs(AVATAR_DIR, exist_ok=True)
+# Use /tmp/avatars as a guaranteed-writable fallback if /app isn't writable
+# (e.g. when the container runs as a non-root user without a chown in the image).
+_APP_AVATARS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "avatars")
+_TMP_AVATARS = "/tmp/avatars"
+try:
+    os.makedirs(_APP_AVATARS, exist_ok=True)
+    # Quick write-test to confirm the directory is actually writable.
+    _test = os.path.join(_APP_AVATARS, ".writetest")
+    with open(_test, "w") as _f:
+        _f.write("ok")
+    os.remove(_test)
+    AVATAR_DIR = _APP_AVATARS
+except OSError:
+    os.makedirs(_TMP_AVATARS, exist_ok=True)
+    AVATAR_DIR = _TMP_AVATARS
+
+# Print early so it appears in Cloud Run logs before the logger is configured.
+print(f"[parabot] AVATAR_DIR={AVATAR_DIR}", flush=True)
 
 # Fallback avatar shown when no profile picture is available.
 DEFAULT_AVATAR = "https://cdn-icons-png.flaticon.com/512/149/149071.png"
