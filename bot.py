@@ -91,7 +91,7 @@ WU_SEVASTO_ELEVATION_M = 150       # /weather_sev
 # WEBHOOK_URL: the public HTTPS base URL where Telegram delivers updates,
 # e.g. "https://parabot-abc123-ew.a.run.app". Cloud Run sets PORT
 # automatically; the bot listens on that port.
-WEBHOOK_URL = os.environ["WEBHOOK_URL"]
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")   # optional but recommended
 PORT = int(os.getenv("PORT", "8080"))
 
@@ -1287,14 +1287,19 @@ async def main():
     await ptb_app.initialize()
     await ptb_app.start()
 
-    # Register the webhook with Telegram
-    await ptb_app.bot.set_webhook(
-        url=webhook_full_url,
-        secret_token=WEBHOOK_SECRET if WEBHOOK_SECRET else None,
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True,
-    )
-    logger.info("Webhook registered at %s", webhook_full_url)
+    # Register the webhook with Telegram (skipped if WEBHOOK_URL is not set,
+    # which can happen on the very first Cloud Run deploy before the URL is known)
+    if WEBHOOK_URL:
+        await ptb_app.bot.set_webhook(
+            url=webhook_full_url,
+            secret_token=WEBHOOK_SECRET if WEBHOOK_SECRET else None,
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+        )
+        logger.info("Webhook registered at %s", webhook_full_url)
+    else:
+        logger.warning("WEBHOOK_URL is not set — skipping webhook registration. "
+                       "The bot will not receive Telegram updates until WEBHOOK_URL is configured.")
 
     # Start the aiohttp server
     runner = web.AppRunner(web_app)

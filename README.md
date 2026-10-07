@@ -45,7 +45,7 @@ GitHub (main branch push)
   └─▶ deploy.yml workflow
         ├─ Builds Docker image
         ├─ Pushes to Artifact Registry
-        └─ Deploys to Cloud Run
+        └─ Deploys to Cloud Run (two-pass: deploy then patch WEBHOOK_URL)
 
 Telegram
   └─▶ HTTPS POST /webhook/<token>
@@ -58,6 +58,15 @@ GitHub Actions cron (09:00 UTC = 12:00 Athens)
 ```
 
 The bot runs in **webhook mode**: Telegram pushes updates to the Cloud Run service over HTTPS. Cloud Run scales to zero when there is no traffic — `--min-instances=1` keeps one instance warm so the first message isn't delayed by a cold start.
+
+### First-deploy WEBHOOK_URL handling
+
+Cloud Run's service URL is not known until after the first deploy. The workflow handles this with a two-pass approach:
+
+1. The deploy step uses the pre-existing service URL (empty on the very first deploy). The bot tolerates an empty `WEBHOOK_URL` at startup and simply skips webhook registration.
+2. Immediately after deploy, a `Fix WEBHOOK_URL and migrate traffic` step patches the real URL into the service's environment and migrates 100% traffic to the new revision. The bot restarts with the correct URL and registers the webhook.
+
+On all subsequent deploys the URL is known in advance, so this is a transparent no-op.
 
 ---
 
@@ -131,9 +140,9 @@ All configuration is via environment variables. In Cloud Run these are injected 
 | `TELEGRAM_BOT_TOKEN` | ✅ | — | Bot token from @BotFather |
 | `AIRTABLE_TOKEN` | ✅ | — | Airtable personal access token |
 | `AIRTABLE_BASE_ID` | ✅ | — | Airtable base ID (`app…`) |
-| `WEBHOOK_URL` | ✅ | — | Public HTTPS base URL (no trailing slash) |
-| `WEBHOOK_SECRET` | recommended | `""` | Secret token for Telegram webhook verification |
-| `DAILY_TRIGGER_TOKEN` | recommended | `""` | Token for the `/trigger_daily_weather` endpoint |
+| `WEBHOOK_URL` | ✅ | — | Public HTTPS base URL (no trailing slash). In Cloud Run this is set automatically by the deploy workflow. For local dev use an ngrok URL. |
+| `WEBHOOK_SECRET` | recommended | `""` | Secret token for Telegram webhook verification. Generate with `openssl rand -hex 32`. |
+| `DAILY_TRIGGER_TOKEN` | recommended | `""` | Token for the `/trigger_daily_weather` endpoint. Generate with `openssl rand -hex 32`. Must match the `DAILY_TRIGGER_TOKEN` GitHub Actions secret. |
 | `OPENWEATHER_API_KEY` | weather | — | For `/weather_para` |
 | `WU_API_KEY` | weather | — | For `/weather_gri`, `/weather_sev`, `/weather_all` |
 | `WU_STATION_ID` | — | `IGRIKA1` | Grika WU station ID |
@@ -196,7 +205,6 @@ gcloud iam service-accounts create "$SA_NAME" \
   --display-name "Parabot GitHub Actions deployer" \
   --project "$PROJECT_ID"
 
-# Permissions needed to push images and deploy Cloud Run
 for ROLE in \
   roles/artifactregistry.writer \
   roles/run.admin \
@@ -213,16 +221,19 @@ done
 ```bash
 POOL_NAME=github-actions-pool
 PROVIDER_NAME=github-provider
-GITHUB_REPO=your-github-username/Parabot   # e.g. jdoe/Parabot
+GITHUB_REPO=your-github-username/parabot   # lowercase, e.g. jdoe/parabot
 
 gcloud iam workload-identity-pools create "$POOL_NAME" \
-  --location=global --project "$PROJECT_ID"
+  --location=global \
+  --display-name="GitHub Actions Pool" \
+  --project "$PROJECT_ID"
 
 gcloud iam workload-identity-pools providers create-oidc "$PROVIDER_NAME" \
   --workload-identity-pool="$POOL_NAME" \
   --location=global \
   --issuer-uri="https://token.actions.githubusercontent.com" \
   --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" \
+  --attribute-condition="attribute.repository=='${GITHUB_REPO}'" \
   --project "$PROJECT_ID"
 
 POOL_ID=$(gcloud iam workload-identity-pools describe "$POOL_NAME" \
@@ -236,6 +247,13 @@ gcloud iam service-accounts add-iam-policy-binding \
   --project "$PROJECT_ID"
 ```
 
+> **Note:** The `GITHUB_REPO` value must be **lowercase** and match exactly what GitHub sends in the OIDC token (e.g. `jdoe/parabot`, not `jdoe/Parabot`). Verify with:
+> ```bash
+> gcloud iam service-accounts get-iam-policy \
+>   "${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
+>   --project "$PROJECT_ID"
+> ```
+
 **5. Store secrets in Secret Manager**
 
 ```bash
@@ -248,7 +266,6 @@ for SECRET in \
   WEBHOOK_SECRET \
   DAILY_TRIGGER_TOKEN; do
   gcloud secrets create "$SECRET" --replication-policy=automatic --project "$PROJECT_ID"
-  # Then add the value:
   echo -n "your-secret-value" | \
     gcloud secrets versions add "$SECRET" --data-file=- --project "$PROJECT_ID"
 done
@@ -256,10 +273,7 @@ done
 
 **6. Grant the Cloud Run service account access to the secrets**
 
-Cloud Run uses the project's default compute service account unless you specify one. The deployer SA already has `secretmanager.secretAccessor`.
-
 ```bash
-# Allow the Cloud Run runtime SA to read secrets
 COMPUTE_SA=$(gcloud iam service-accounts list \
   --filter="displayName:Compute Engine default service account" \
   --format="value(email)" \
@@ -276,29 +290,35 @@ Add these **secrets** (`Settings → Secrets and variables → Actions → Secre
 
 | Secret | Value |
 |---|---|
-| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Output of: `gcloud iam workload-identity-pools providers describe "$PROVIDER_NAME" --workload-identity-pool="$POOL_NAME" --location=global --format="value(name)"` |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Output of: `gcloud iam workload-identity-pools providers describe "$PROVIDER_NAME" --workload-identity-pool="$POOL_NAME" --location=global --project "$PROJECT_ID" --format="value(name)"` |
 | `GCP_SERVICE_ACCOUNT` | `parabot-deployer@<PROJECT_ID>.iam.gserviceaccount.com` |
 | `DAILY_TRIGGER_TOKEN` | Same value you stored in Secret Manager |
-| `CLOUD_RUN_URL` | Cloud Run service URL (available after the first deploy, e.g. `https://parabot-abc123-ew.a.run.app`) |
+| `CLOUD_RUN_URL` | Cloud Run service URL — set this after the first deploy (e.g. `https://parabot-abc123-ew.a.run.app`) |
 
 Add these **variables** (`Settings → Secrets and variables → Actions → Variables`):
 
 | Variable | Value |
 |---|---|
-| `GCP_PROJECT_ID` | Your GCP project ID |
 | `GCP_REGION` | e.g. `europe-west1` |
+
+> **Note:** `GCP_PROJECT_ID` is hardcoded in `deploy.yml`. Update it there if you move to a different project.
 
 ### First deploy
 
-Push to `main`. The `deploy.yml` workflow builds the image, pushes it to Artifact Registry, and deploys it to Cloud Run. After the first successful deploy:
+Push to `main`. The `deploy.yml` workflow:
+
+1. Builds the Docker image and pushes it to Artifact Registry.
+2. Deploys to Cloud Run with `--no-traffic` (the service URL isn't known yet so `WEBHOOK_URL` is empty; the bot starts but skips webhook registration).
+3. Patches `WEBHOOK_URL` with the real service URL and migrates 100% traffic to the new revision. The bot restarts and registers the webhook with Telegram.
+
+After the first successful deploy:
 
 1. Copy the Cloud Run service URL from the workflow output.
-2. Add it as the `CLOUD_RUN_URL` Actions secret (used by the daily workflow).
-3. The `WEBHOOK_URL` env var is already set automatically by `deploy.yml` using the `steps.deploy.outputs.url` value from the Cloud Run action — no manual step needed there.
+2. Add it as the `CLOUD_RUN_URL` Actions secret (used by the daily weather workflow).
 
 ### Subsequent deploys
 
-Push to `main`. The workflow runs automatically.
+Push to `main`. The workflow runs automatically. `WEBHOOK_URL` is read from the existing service before deploy, so the two-pass mechanism is a transparent no-op.
 
 ---
 
