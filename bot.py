@@ -1494,10 +1494,27 @@ MAP_HTML_PAGE = """<!DOCTYPE html>
         tg.expand();
 
         const map = L.map('map').setView([39.47, 20.51], 12);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+
+        // Base layers
+        const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             maxZoom: 19,
-            attribution: '&copy; OpenStreetMap'
-        }).addTo(map);
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+        });
+
+        const terrainLayer = L.tileLayer('https://tiles.stadiamaps.com/tiles/stamen_terrain/{z}/{x}/{y}{r}.png', {
+            maxZoom: 18,
+            attribution: '&copy; <a href="https://stadiamaps.com/" target="_blank">Stadia Maps</a> &copy; <a href="https://stamen.com/" target="_blank">Stamen Design</a> &copy; <a href="https://openmaptiles.org/" target="_blank">OpenMapTiles</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+        });
+
+        // Add terrain as the default base layer
+        terrainLayer.addTo(map);
+
+        // Layer control to switch between base maps
+        const baseLayers = {
+            "Terrain": terrainLayer,
+            "OpenStreetMap": osmLayer
+        };
+        L.control.layers(baseLayers).addTo(map);
 
         let markers = {};
         let boundsSet = false;
