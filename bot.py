@@ -213,9 +213,21 @@ async def update_user_location(user, location, context: ContextTypes.DEFAULT_TYP
     user_id_key = str(user.id)
     existing = active_locations.get(user_id_key, {})
 
-    # Re-use a cached avatar URL to avoid redundant Telegram API calls.
-    avatar_url = existing.get("avatar_url")
-    if not avatar_url or avatar_url == DEFAULT_AVATAR:
+    # Determine whether we need to (re-)fetch the avatar:
+    #   1. No URL stored yet.
+    #   2. Stored URL is the default fallback (previous fetch failed — retry).
+    #   3. Stored URL is a local /avatars/ path but the file is gone
+    #      (e.g. container restarted and wiped the ephemeral filesystem).
+    avatar_url = existing.get("avatar_url", "")
+    needs_fetch = (
+        not avatar_url
+        or avatar_url == DEFAULT_AVATAR
+        or (
+            avatar_url.startswith("/avatars/")
+            and not os.path.isfile(os.path.join(AVATAR_DIR, os.path.basename(avatar_url)))
+        )
+    )
+    if needs_fetch:
         avatar_url = await fetch_user_avatar(user, context)
 
     # Preserve altitude already captured via the Mini App geolocation API.
