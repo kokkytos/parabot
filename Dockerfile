@@ -24,6 +24,11 @@ COPY --from=builder /install /usr/local
 # Copy application source
 COPY bot.py .
 
+# Create the avatars cache directory and give the non-root user ownership.
+# bot.py calls os.makedirs("avatars", exist_ok=True) at startup, but the
+# non-root user needs write access to /app for that to succeed.
+RUN mkdir -p /app/avatars && chown -R parabot:parabot /app
+
 # Drop to non-root
 USER parabot
 
