@@ -108,6 +108,11 @@ DAILY_TRIGGER_TOKEN = os.getenv("DAILY_TRIGGER_TOKEN", "")
 # (or any HTTPS URL serving the Flask/aiohttp map page).
 MINI_APP_URL = os.getenv("MINI_APP_URL", "")
 
+# Stadia Maps API key for serving Stamen Terrain tiles in the live map.
+# Get a free key at https://client.stadiamaps.com/signup/
+# If not set, falls back to OSM only (no terrain layer).
+STADIA_API_KEY = os.getenv("STADIA_API_KEY", "")
+
 # Local directory used to cache Telegram profile pictures so the map
 # can serve them over HTTP without hitting Telegram's CDN on every refresh.
 # Use /tmp/avatars as a guaranteed-writable fallback if /app isn't writable
@@ -1501,20 +1506,30 @@ MAP_HTML_PAGE = """<!DOCTYPE html>
             attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         });
 
-        const terrainLayer = L.tileLayer('https://tiles.stadiamaps.com/tiles/stamen_terrain/{z}/{x}/{y}{r}.png', {
-            maxZoom: 18,
-            attribution: '&copy; <a href="https://stadiamaps.com/" target="_blank">Stadia Maps</a> &copy; <a href="https://stamen.com/" target="_blank">Stamen Design</a> &copy; <a href="https://openmaptiles.org/" target="_blank">OpenMapTiles</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-        });
+        const stadiaKey = "{{STADIA_API_KEY}}";
+        let baseLayers = { "OpenStreetMap": osmLayer };
+        let defaultLayer = osmLayer;
 
-        // Add terrain as the default base layer
-        terrainLayer.addTo(map);
+        // Only add Stamen Terrain if STADIA_API_KEY is configured
+        if (stadiaKey && stadiaKey.length > 10) {
+            const terrainLayer = L.tileLayer(
+                `https://tiles.stadiamaps.com/tiles/stamen_terrain/{z}/{x}/{y}{r}.png?api_key=${stadiaKey}`,
+                {
+                    maxZoom: 18,
+                    attribution: '&copy; <a href="https://stadiamaps.com/">Stadia Maps</a> &copy; <a href="https://stamen.com/">Stamen Design</a> &copy; <a href="https://openmaptiles.org/">OpenMapTiles</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+                }
+            );
+            baseLayers = {
+                "Terrain": terrainLayer,
+                "OpenStreetMap": osmLayer
+            };
+            defaultLayer = terrainLayer;
+        }
 
-        // Layer control to switch between base maps
-        const baseLayers = {
-            "Terrain": terrainLayer,
-            "OpenStreetMap": osmLayer
-        };
-        L.control.layers(baseLayers).addTo(map);
+        defaultLayer.addTo(map);
+        if (Object.keys(baseLayers).length > 1) {
+            L.control.layers(baseLayers).addTo(map);
+        }
 
         let markers = {};
         let boundsSet = false;
@@ -1617,8 +1632,11 @@ MAP_HTML_PAGE = """<!DOCTYPE html>
 # ============================================================
 
 async def handle_map_index(request: web.Request) -> web.Response:
-    """Serve the Mini App HTML page."""
-    return web.Response(text=MAP_HTML_PAGE, content_type="text/html")
+    """Serve the Mini App HTML page with injected config."""
+    # Inject STADIA_API_KEY at runtime so it never appears in git.
+    # The template uses {{STADIA_API_KEY}} as a placeholder.
+    html = MAP_HTML_PAGE.replace("{{STADIA_API_KEY}}", STADIA_API_KEY)
+    return web.Response(text=html, content_type="text/html")
 
 
 async def handle_api_locations(request: web.Request) -> web.Response:

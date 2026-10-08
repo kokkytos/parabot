@@ -160,6 +160,7 @@ All configuration is via environment variables. In Cloud Run these are injected 
 | `AIRTABLE_BASE_ID` | ✅ | — | Airtable base ID (`app…`) |
 | `WEBHOOK_URL` | ✅ | — | Public HTTPS base URL (no trailing slash). In Cloud Run this is set automatically by the deploy workflow. For local dev use an ngrok URL. |
 | `MINI_APP_URL` | map | `""` | Public HTTPS URL Telegram opens as the Web App when a user taps `/map`. Typically the same as `WEBHOOK_URL` since the map is served at `GET /`. |
+| `STADIA_API_KEY` | map | `""` | Stadia Maps API key for Stamen Terrain tiles in the live map. Get a free key at [stadiamaps.com](https://client.stadiamaps.com/signup/). If not set, the map falls back to OpenStreetMap only. |
 | `WEBHOOK_SECRET` | recommended | `""` | Secret token for Telegram webhook verification. Generate with `openssl rand -hex 32`. |
 | `DAILY_TRIGGER_TOKEN` | recommended | `""` | Token for the `/trigger_daily_weather` endpoint. Generate with `openssl rand -hex 32`. Must match the `DAILY_TRIGGER_TOKEN` GitHub Actions secret. |
 | `OPENWEATHER_API_KEY` | weather | — | For `/weather_para` |
@@ -293,7 +294,7 @@ for SECRET in \
   WU_API_KEY \
   WEBHOOK_SECRET \
   DAILY_TRIGGER_TOKEN \
-  MINI_APP_URL; do
+  STADIA_API_KEY; do
   gcloud secrets create "$SECRET" --replication-policy=automatic --project "$PROJECT_ID"
   echo -n "your-secret-value" | \
     gcloud secrets versions add "$SECRET" --data-file=- --project "$PROJECT_ID"

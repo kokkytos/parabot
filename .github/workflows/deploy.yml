@@ -79,6 +79,7 @@ jobs:
             WU_API_KEY=WU_API_KEY:latest
             WEBHOOK_SECRET=WEBHOOK_SECRET:latest
             DAILY_TRIGGER_TOKEN=DAILY_TRIGGER_TOKEN:latest
+            STADIA_API_KEY=STADIA_API_KEY:latest
           env_vars: |
             WEBHOOK_URL=${{ steps.existing.outputs.url }}
             MINI_APP_URL=${{ steps.existing.outputs.url }}
