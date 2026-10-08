@@ -1507,10 +1507,34 @@ MAP_HTML_PAGE = """<!DOCTYPE html>
         });
 
         const stadiaKey = "{{STADIA_API_KEY}}";
-        let baseLayers = { "OpenStreetMap": osmLayer };
+
+
+
+        // Esri World Imagery (no API key required)
+        const satelliteLayer = L.tileLayer(
+            'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+            {
+                maxZoom: 19,
+                maxNativeZoom: 18,
+                attribution: 'Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community'
+            }
+        );
+
+        // Place names + borders drawn on top of the imagery
+        const labelsLayer = L.tileLayer(
+            'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+            { maxZoom: 19, maxNativeZoom: 18, pane: 'overlayPane' }
+        );
+        const hybridLayer = L.layerGroup([satelliteLayer, labelsLayer]);
+
+        let baseLayers = {
+            "OpenStreetMap": osmLayer,
+            "Satellite": satelliteLayer,
+            "Hybrid (Satellite + Labels)": hybridLayer
+        };
         let defaultLayer = osmLayer;
 
-        // Only add Stamen Terrain if STADIA_API_KEY is configured
+        // Add Stamen Terrain if STADIA_API_KEY is configured, and make it the default
         if (stadiaKey && stadiaKey.length > 10) {
             const terrainLayer = L.tileLayer(
                 `https://tiles.stadiamaps.com/tiles/stamen_terrain/{z}/{x}/{y}{r}.png?api_key=${stadiaKey}`,
@@ -1519,12 +1543,10 @@ MAP_HTML_PAGE = """<!DOCTYPE html>
                     attribution: '&copy; <a href="https://stadiamaps.com/">Stadia Maps</a> &copy; <a href="https://stamen.com/">Stamen Design</a> &copy; <a href="https://openmaptiles.org/">OpenMapTiles</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
                 }
             );
-            baseLayers = {
-                "Terrain": terrainLayer,
-                "OpenStreetMap": osmLayer
-            };
+            baseLayers = { "Terrain": terrainLayer, ...baseLayers };
             defaultLayer = terrainLayer;
         }
+
 
         defaultLayer.addTo(map);
         if (Object.keys(baseLayers).length > 1) {
