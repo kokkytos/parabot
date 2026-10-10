@@ -110,3 +110,35 @@ jobs:
 
       - name: Show deployed URL
         run: echo "Deployed to ${{ steps.deploy.outputs.url }}"
+
+# ── Upsert Google Cloud Scheduler Job ─────────────────────────────────
+      # Automatically creates or updates the daily scheduler trigger at 09:07 Athens time
+      - name: Setup Cloud Scheduler Job
+        run: |
+          SERVICE_URL="${{ steps.deploy.outputs.url }}"
+          JOB_NAME="daily-weather-trigger"
+          
+          if gcloud scheduler jobs describe "$JOB_NAME" --location="${{ env.GCP_REGION }}" --project="${{ env.GCP_PROJECT_ID }}" >/dev/null 2>&1; then
+            echo "Updating existing Cloud Scheduler job..."
+            gcloud scheduler jobs update http "$JOB_NAME" \
+              --location="${{ env.GCP_REGION }}" \
+              --project="${{ env.GCP_PROJECT_ID }}" \
+              --schedule="0 12 * * *" \
+              --time-zone="Europe/Athens" \
+              --uri="${SERVICE_URL}/trigger_daily_weather" \
+              --http-method=POST \
+              --headers="X-Trigger-Token=DAILY_TRIGGER_TOKEN"
+          else
+            echo "Creating new Cloud Scheduler job..."
+            gcloud scheduler jobs create http "$JOB_NAME" \
+              --location="${{ env.GCP_REGION }}" \
+              --project="${{ env.GCP_PROJECT_ID }}" \
+              --schedule="0 12 * * *" \
+              --time-zone="Europe/Athens" \
+              --uri="${SERVICE_URL}/trigger_daily_weather" \
+              --http-method=POST \
+              --headers="X-Trigger-Token=DAILY_TRIGGER_TOKEN"
+          fi
+
+      - name: Show deployed URL
+        run: echo "Deployed to ${{ steps.deploy.outputs.url }}"
