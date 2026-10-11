@@ -116,8 +116,6 @@ jobs:
         run: |
           SERVICE_URL="${{ steps.deploy.outputs.url }}"
           JOB_NAME="daily-weather-trigger"
-          
-          # Pass the secret safely from GitHub Secrets into the bash variable
           TRIGGER_TOKEN="${{ secrets.DAILY_TRIGGER_TOKEN }}"
 
           if gcloud scheduler jobs describe "$JOB_NAME" --location="${{ env.GCP_REGION }}" --project="${{ env.GCP_PROJECT_ID }}" >/dev/null 2>&1; then
@@ -129,7 +127,7 @@ jobs:
               --time-zone="Europe/Athens" \
               --uri="${SERVICE_URL}/trigger_daily_weather" \
               --http-method=POST \
-              --headers="X-Trigger-Token=${TRIGGER_TOKEN}"
+              --update-headers="X-Trigger-Token=${TRIGGER_TOKEN}"
           else
             echo "Creating new Cloud Scheduler job..."
             gcloud scheduler jobs create http "$JOB_NAME" \
