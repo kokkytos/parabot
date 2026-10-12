@@ -123,7 +123,7 @@ jobs:
             gcloud scheduler jobs update http "$JOB_NAME" \
               --location="${{ env.GCP_REGION }}" \
               --project="${{ env.GCP_PROJECT_ID }}" \
-              --schedule="7 9 * * *" \
+              --schedule="0 12 * * *" \
               --time-zone="Europe/Athens" \
               --uri="${SERVICE_URL}/trigger_daily_weather" \
               --http-method=POST \
@@ -133,7 +133,7 @@ jobs:
             gcloud scheduler jobs create http "$JOB_NAME" \
               --location="${{ env.GCP_REGION }}" \
               --project="${{ env.GCP_PROJECT_ID }}" \
-              --schedule="7 9 * * *" \
+              --schedule="0 12 * * *" \
               --time-zone="Europe/Athens" \
               --uri="${SERVICE_URL}/trigger_daily_weather" \
               --http-method=POST \
